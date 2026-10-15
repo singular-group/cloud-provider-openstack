@@ -18,11 +18,14 @@ package cinder
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/client-go/listers/core/v1"
+	"k8s.io/cloud-provider-openstack/pkg/csi/cinder/csiaddons"
 	"k8s.io/cloud-provider-openstack/pkg/csi/cinder/openstack"
 	"k8s.io/cloud-provider-openstack/pkg/util/metadata"
 	"k8s.io/cloud-provider-openstack/pkg/util/mount"
@@ -78,6 +81,8 @@ type Driver struct {
 	nscap []*csi.NodeServiceCapability
 
 	pvcLister v1.PersistentVolumeClaimLister
+
+	csiAddonsEndpoint string
 }
 
 type DriverOpts struct {
@@ -86,16 +91,21 @@ type DriverOpts struct {
 	WithTopology bool
 
 	PVCLister v1.PersistentVolumeClaimLister
+
+	// CSIAddonsEndpoint, when set, serves the CSI-Addons services on this
+	// unix:// endpoint.
+	CSIAddonsEndpoint string
 }
 
 func NewDriver(o *DriverOpts) *Driver {
 	d := &Driver{
-		name:         driverName,
-		fqVersion:    fmt.Sprintf("%s@%s", Version, version.Version),
-		endpoint:     o.Endpoint,
-		clusterID:    o.ClusterID,
-		withTopology: o.WithTopology,
-		pvcLister:    o.PVCLister,
+		name:              driverName,
+		fqVersion:         fmt.Sprintf("%s@%s", Version, version.Version),
+		endpoint:          o.Endpoint,
+		clusterID:         o.ClusterID,
+		withTopology:      o.WithTopology,
+		pvcLister:         o.PVCLister,
+		csiAddonsEndpoint: o.CSIAddonsEndpoint,
 	}
 
 	klog.Info("Driver: ", d.name)
@@ -204,5 +214,32 @@ func (d *Driver) Run() {
 		klog.Fatal("No CSI services initialized")
 	}
 
+	if d.csiAddonsEndpoint != "" {
+		s, lis, err := d.newCSIAddonsServer()
+		if err != nil {
+			klog.Fatalf("Failed to listen on CSI-Addons endpoint: %v", err)
+		}
+		klog.Infof("Listening for CSI-Addons connections on address: %#v", lis.Addr())
+		go func() {
+			if err := s.Serve(lis); err != nil {
+				klog.Fatalf("CSI-Addons server stopped: %v", err)
+			}
+		}()
+	}
+
 	RunServicesInitialized(d.endpoint, d.ids, d.cs, d.ns)
+}
+
+// newCSIAddonsServer listens on the CSI-Addons endpoint and builds the server
+// for the services this driver provides.
+func (d *Driver) newCSIAddonsServer() (*csiaddons.Server, net.Listener, error) {
+	lis, err := listenCSIAddons(d.csiAddonsEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	opts := csiaddons.Options{DriverName: d.name, Version: d.fqVersion, Controller: d.cs != nil}
+	if d.ns != nil {
+		opts.Mounter = d.ns.Mount.Mounter()
+	}
+	return csiaddons.NewServer(opts, grpc.UnaryInterceptor(logGRPC)), lis, nil
 }

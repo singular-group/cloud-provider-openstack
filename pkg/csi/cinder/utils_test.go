@@ -20,6 +20,9 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -27,6 +30,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseEndpoint(t *testing.T) {
@@ -166,4 +170,35 @@ func TestSplitToken(t *testing.T) {
 			assert.Equal(t, test.cloud, cloud)
 		})
 	}
+}
+
+// csiAddonsSocket returns a socket path in a short temporary directory:
+// t.TempDir() embeds the test name and can exceed the unix socket length limit.
+func csiAddonsSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "csia")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "csi-addons.sock")
+}
+
+func TestListenCSIAddons(t *testing.T) {
+	sock := csiAddonsSocket(t)
+
+	// A stale socket left by a crashed container is replaced, not fatal.
+	stale, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	stale.Close()
+
+	lis, err := listenCSIAddons("unix://" + sock)
+	require.NoError(t, err)
+	lis.Close()
+
+	// The CSI-Addons gRPC has no authentication: never listen on the network.
+	_, err = listenCSIAddons("tcp://127.0.0.1:0")
+	assert.Error(t, err)
+
+	_, err = listenCSIAddons("not-an-endpoint")
+	assert.Error(t, err)
 }
