@@ -1,0 +1,90 @@
+# Singular Group build of cinder-csi-plugin for its own clusters. Publishes
+# on merges to main; PRs to main run the tests only. Not part of the
+# upstream contribution.
+name: cinder-csi-plugin image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# pull_request keys on github.ref (refs/pull/<n>/merge), not the commit sha:
+# a fast-forward merge can hand main that same sha, and keying on it would
+# needlessly serialize the PR's test-only run against the main publish run.
+concurrency:
+  group: cinder-csi-plugin-image-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.2"
+      - name: Unit tests
+        run: go test -count=1 -tags=unit ./pkg/csi/cinder/... ./cmd/cinder-csi-plugin/...
+      - name: CSI sanity
+        run: go test -count=1 ./tests/sanity/cinder/...
+
+  publish:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/cinder-csi-plugin
+      TAG: v1.36.0-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Published tags are immutable: a re-run must not replace the image the
+      # clusters pin by digest. Only a tag the registry reports as missing is
+      # built; any other lookup error (network, etc.) fails the job.
+      - name: Check whether the tag is already published
+        id: published
+        run: |
+          # Keeps stderr, discards stdout.
+          if err=$(docker buildx imagetools inspect "$IMAGE:$TAG" 2>&1 >/dev/null); then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          # 403 = package not created yet (first publish); digest pins catch a wrong re-push.
+          elif grep -qiE 'not found|manifest unknown|name unknown|403 Forbidden|denied' <<<"$err"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$err" >&2
+            exit 1
+          fi
+      - name: Build and push
+        id: build
+        if: steps.published.outputs.exists == 'false'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: cinder-csi-plugin
+          platforms: linux/amd64
+          build-args: VERSION=${{ env.TAG }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          push: true
+      - name: Summary
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "$IMAGE:$TAG@$DIGEST" | tee -a "$GITHUB_STEP_SUMMARY"
