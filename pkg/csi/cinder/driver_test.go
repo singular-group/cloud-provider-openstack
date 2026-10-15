@@ -17,10 +17,19 @@ limitations under the License.
 package cinder
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/csi-addons/spec/lib/go/identity"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"k8s.io/cloud-provider-openstack/pkg/csi/cinder/openstack"
+	"k8s.io/cloud-provider-openstack/pkg/util/metadata"
+	"k8s.io/cloud-provider-openstack/pkg/util/mount"
 )
 
 var (
@@ -60,4 +69,63 @@ func TestValidateControllerServiceRequest(t *testing.T) {
 	// Test controller service list snapshot is supported
 	err = d.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS)
 	assert.NoError(t, err)
+}
+
+// serveCSIAddons serves d's CSI-Addons server on sock and returns a client.
+func serveCSIAddons(t *testing.T, d *Driver, sock string) *grpc.ClientConn {
+	t.Helper()
+	s, lis, err := d.newCSIAddonsServer()
+	require.NoError(t, err)
+	go func() { _ = s.Serve(lis) }()
+	// Registered before the conn's cleanup: t.Cleanup is LIFO, so the client
+	// conn closes first and GracefulStop does not wait on it.
+	t.Cleanup(s.Stop)
+
+	conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+func csiAddonsCapabilities(t *testing.T, conn *grpc.ClientConn) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := identity.NewIdentityClient(conn).GetCapabilities(ctx, &identity.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	var caps []string
+	for _, c := range resp.GetCapabilities() {
+		if svc := c.GetService(); svc != nil {
+			caps = append(caps, "service:"+svc.GetType().String())
+		}
+		if rs := c.GetReclaimSpace(); rs != nil {
+			caps = append(caps, "reclaimspace:"+rs.GetType().String())
+		}
+	}
+	return caps
+}
+
+func TestNewCSIAddonsServerNodeMode(t *testing.T) {
+	sock := csiAddonsSocket(t)
+	d := NewDriver(&DriverOpts{Endpoint: FakeEndpoint, ClusterID: FakeCluster, CSIAddonsEndpoint: "unix://" + sock})
+	d.SetupNodeService(new(mount.MountMock), new(metadata.MetadataMock), openstack.BlockStorageOpts{}, map[string]string{})
+	conn := serveCSIAddons(t, d, sock)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, err := identity.NewIdentityClient(conn).GetIdentity(ctx, &identity.GetIdentityRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, driverName, id.GetName())
+	assert.Equal(t, d.fqVersion, id.GetVendorVersion())
+
+	assert.Equal(t, []string{"service:NODE_SERVICE", "reclaimspace:ONLINE"}, csiAddonsCapabilities(t, conn))
+}
+
+func TestNewCSIAddonsServerControllerMode(t *testing.T) {
+	sock := csiAddonsSocket(t)
+	d := NewDriver(&DriverOpts{Endpoint: FakeEndpoint, ClusterID: FakeCluster, CSIAddonsEndpoint: "unix://" + sock})
+	d.SetupControllerService(map[string]openstack.IOpenStack{"": new(openstack.OpenStackMock)})
+	conn := serveCSIAddons(t, d, sock)
+
+	assert.Equal(t, []string{"service:CONTROLLER_SERVICE", "reclaimspace:OFFLINE"}, csiAddonsCapabilities(t, conn))
 }

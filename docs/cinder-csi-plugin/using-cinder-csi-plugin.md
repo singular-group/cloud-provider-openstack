@@ -120,6 +120,15 @@ In addition to the standard set of klog flags, `cinder-csi-plugin` accepts the f
   Defaults to `true` (enabled).
   </dd>
 
+  <dt>--csi-addons-endpoint &lt;endpoint&gt;</dt>
+  <dd>
+  This argument is optional.
+
+  The `unix://` endpoint where the [CSI-Addons](https://github.com/csi-addons/spec) Identity and ReclaimSpace services, used by [kubernetes-csi-addons](https://github.com/csi-addons/kubernetes-csi-addons), will listen (example: `unix:///csi/csi-addons.sock`). See [CSI-Addons ReclaimSpace](./features.md#csi-addons-reclaimspace).
+
+  The default is empty string, which means the CSI-Addons services are disabled.
+  </dd>
+
   <dt>--pvc-annotations &lt;disabled&gt;</dt>
   <dd>
   If set to true then the CSI driver will use PVC annotations to provide volume
@@ -272,6 +281,7 @@ helm install --namespace kube-system --name cinder-csi ./charts/cinder-csi-plugi
 * [Ephemeral Volumes](./features.md#inline-volumes)
 * [Multiattach Volumes](./features.md#multi-attach-volumes)
 * [Liveness probe](./features.md#liveness-probe)
+* [CSI-Addons ReclaimSpace](./features.md#csi-addons-reclaimspace)
 
 ## Sidecar Compatibility
 

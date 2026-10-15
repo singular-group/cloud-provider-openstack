@@ -15,6 +15,7 @@
   - [Volume Cloning](#volume-cloning)
   - [Multi-Attach Volumes](#multi-attach-volumes)
   - [Liveness probe](#liveness-probe)
+  - [CSI-Addons ReclaimSpace](#csi-addons-reclaimspace)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -117,3 +118,20 @@ This should enable to attach a volume to multiple hosts/servers simultaneously.
 The [liveness probe](https://github.com/kubernetes-csi/livenessprobe) is a sidecar container that exposes an HTTP `/healthz` endpoint, which serves as kubelet's `livenessProbe` hook to monitor health of a CSI driver.
 
 Cinder CSI driver added liveness probe side container by default and refer to [manifest](../../manifests/cinder-csi-plugin/cinder-csi-controllerplugin.yaml) and [charts](../../charts/cinder-csi-plugin) for more information.
+
+## CSI-Addons ReclaimSpace
+
+The driver can serve the [CSI-Addons](https://github.com/csi-addons/spec) ReclaimSpace service. A reclaim request runs `FITRIM` on the filesystem of a mounted volume, so blocks freed inside the filesystem are discarded down to the Cinder backend.
+
+To enable it:
+
+* Set `--csi-addons-endpoint` (for example `unix:///csi/csi-addons.sock`) on both the node plugin and the controller plugin. The node plugin runs the reclaim; the [kubernetes-csi-addons](https://github.com/csi-addons/kubernetes-csi-addons) controller also requires the controller plugin to be registered before it runs one.
+* Deploy the kubernetes-csi-addons controller, and add its `k8s-sidecar` container to both plugin pods, sharing the directory that holds the socket. The node plugin already runs privileged, which `FITRIM` requires.
+
+Reclaims are scheduled with kubernetes-csi-addons resources: a `ReclaimSpaceJob` (one-off) or a `ReclaimSpaceCronJob` (recurring) for a PVC, or the `reclaimspace.csiaddons.openshift.io/schedule` annotation (for example `"@weekly"`) on a StorageClass for all of its PVCs.
+
+Limitations:
+
+* Filesystem volumes only: a request for a block volume returns `Unimplemented`.
+* Discard must reach the Cinder backend: the backend must report discard support (Cinder's `report_discard_supported` backend option) so the volume is attached with discard enabled. If the volume's disk does not support discard, `FITRIM` fails with `EOPNOTSUPP` and the request returns `Internal`.
+* `FITRIM` is not interrupted when the request deadline expires; it runs to completion. A request for a volume that is still being trimmed returns `Aborted`.

@@ -3,6 +3,8 @@ package cinder
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"strings"
 	"sync/atomic"
 
@@ -118,4 +120,22 @@ func joinToken(str1, str2 string) string {
 		return str1
 	}
 	return str1 + ":" + str2
+}
+
+// listenCSIAddons listens on a unix:// endpoint for the CSI-Addons services,
+// replacing a stale socket. Other schemes are refused: those services carry no
+// authentication and must not be reachable over the network.
+func listenCSIAddons(endpoint string) (net.Listener, error) {
+	proto, addr, err := ParseEndpoint(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if proto != "unix" {
+		return nil, fmt.Errorf("CSI-Addons endpoint must be unix://, got %s", endpoint)
+	}
+	addr = "/" + addr
+	if err := os.Remove(addr); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to remove %s: %w", addr, err)
+	}
+	return net.Listen(proto, addr)
 }
